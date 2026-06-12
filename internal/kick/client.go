@@ -1,11 +1,16 @@
 package kick
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"time"
+
+	"github.com/gorilla/websocket"
+	utls "github.com/refraction-networking/utls"
 )
 
 // defaultHeaders applied to every API request.
@@ -19,19 +24,99 @@ var defaultHeaders = http.Header{
 	"Sec-Fetch-Dest":  {"empty"},
 	"Sec-Fetch-Mode":  {"cors"},
 	"Sec-Fetch-Site":  {"same-origin"},
-	"User-Agent":      {"Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0"},
+	"User-Agent":      {"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
 }
 
-// Client is a Kick.com API client with retry support.
+// Client is a Kick.com API client with retry support and browser TLS fingerprinting.
 type Client struct {
-	http *http.Client
+	http   *http.Client
+	wsDial *websocket.Dialer
 }
 
-// NewClient creates a new Client that mimics a Chrome 120 browser.
+// newUTLSConn dials a raw TCP connection then wraps it with utls using a Chrome 120
+// TLS fingerprint to bypass Cloudflare bot detection.
+func newUTLSConn(ctx context.Context, network, addr string, dialer *net.Dialer) (net.Conn, error) {
+	conn, err := dialer.DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract the hostname from addr (format "host:port") for SNI
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("parse addr for SNI: %w", err)
+	}
+
+	// Start with Chrome 120's fingerprint spec
+	spec, err := utls.UTLSIdToSpec(utls.HelloChrome_120)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("get chrome spec: %w", err)
+	}
+
+	// Chrome normally advertises "h2" + "http/1.1" via ALPN — but servers
+	// pick h2, and Go's http.Transport with custom DialTLSContext doesn't
+	// auto-upgrade to HTTP/2, causing "malformed HTTP response".  We strip
+	// h2 from ALPN and remove the ApplicationSettingsExtension entirely.
+	var cleaned []utls.TLSExtension
+	for _, ext := range spec.Extensions {
+		switch ext.(type) {
+		case *utls.ALPNExtension:
+			cleaned = append(cleaned, &utls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}})
+		case *utls.ApplicationSettingsExtension:
+			// Only needed for h2; skip it
+		default:
+			cleaned = append(cleaned, ext)
+		}
+	}
+	spec.Extensions = cleaned
+
+	tlsConn := utls.UClient(conn, &utls.Config{
+		ServerName: host,
+	}, utls.HelloCustom)
+
+	if err := tlsConn.ApplyPreset(&spec); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("apply preset: %w", err)
+	}
+
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("utls handshake: %w", err)
+	}
+
+	return tlsConn, nil
+}
+
+// NewClient creates a new Client that mimics a Chrome 120 browser with
+// utls TLS fingerprinting on both HTTP and WebSocket connections.
 func NewClient() *Client {
+	netDialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+
+	transport := &http.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return newUTLSConn(ctx, network, addr, netDialer)
+		},
+		MaxIdleConns:       5,
+		IdleConnTimeout:    90 * time.Second,
+		DisableCompression: false,
+	}
+
+	wsDial := &websocket.Dialer{
+		NetDialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return newUTLSConn(ctx, network, addr, netDialer)
+		},
+		HandshakeTimeout: 30 * time.Second,
+	}
+
 	return &Client{
 		http: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) >= 5 {
 					return fmt.Errorf("too many redirects")
@@ -39,6 +124,7 @@ func NewClient() *Client {
 				return nil
 			},
 		},
+		wsDial: wsDial,
 	}
 }
 

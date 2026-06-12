@@ -46,7 +46,7 @@ func (c *Client) Connect(
 		log.Printf("  → URL: wss://websockets.kick.com/viewer/v1/connect?token=%s...\n", token[:20])
 
 		wsURL := fmt.Sprintf("wss://websockets.kick.com/viewer/v1/connect?token=%s", token)
-		ws, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
+		ws, _, err := c.wsDial.DialContext(ctx, wsURL, nil)
 		if err != nil {
 			log.Printf("❌ WebSocket dial error (attempt %d/%d): %v\n", retry+1, maxRetries, err)
 			if isAuthError(err) {
