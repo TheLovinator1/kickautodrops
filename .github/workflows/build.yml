@@ -21,47 +21,40 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
     
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    - name: Set up Go
+      uses: actions/setup-go@v5
       with:
-        python-version: '3.11'
+        go-version: '1.26'
+        cache: true
     
-    - name: Install dependencies
+    - name: Build
       run: |
-        python -m pip install --upgrade pip
-        pip install pyinstaller
-        pip install -r requirements.txt
-    
-    - name: Build with PyInstaller
-      run: |
-        pyinstaller index.spec
+        go build -ldflags="-s -w" -o kickautodrops${{ runner.os == 'Windows' && '.exe' || '' }} .
     
     - name: Create release archive (Windows)
       if: runner.os == 'Windows'
+      shell: pwsh
       run: |
-        cd dist
-        7z a ../KickAutoDrops-windows.zip KickAutoDrops.exe example_config.ini locales/
+        Compress-Archive -Path kickautodrops.exe,LICENSE,README.md -DestinationPath kickautodrops-windows.zip
     
     - name: Create release archive (Linux)
       if: runner.os == 'Linux'
       run: |
-        cd dist
-        chmod +x KickAutoDrops
-        tar -czf ../KickAutoDrops-linux.tar.gz KickAutoDrops example_config.ini locales/
+        tar -czf kickautodrops-linux.tar.gz kickautodrops LICENSE README.md
     
     - name: Upload Windows artifact
       if: runner.os == 'Windows'
       uses: actions/upload-artifact@v4
       with:
-        name: KickAutoDrops-windows
-        path: KickAutoDrops-windows.zip
+        name: kickautodrops-windows
+        path: kickautodrops-windows.zip
     
     - name: Upload Linux artifact
       if: runner.os == 'Linux'
       uses: actions/upload-artifact@v4
       with:
-        name: KickAutoDrops-linux
-        path: KickAutoDrops-linux.tar.gz
+        name: kickautodrops-linux
+        path: kickautodrops-linux.tar.gz
     
   release:
     name: Publish Release
@@ -79,7 +72,7 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          artifacts/KickAutoDrops-windows.zip
-          artifacts/KickAutoDrops-linux.tar.gz
+          artifacts/kickautodrops-windows/kickautodrops-windows.zip
+          artifacts/kickautodrops-linux/kickautodrops-linux.tar.gz
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
